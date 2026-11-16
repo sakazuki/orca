@@ -1,0 +1,35 @@
+name: Fork Checks
+
+# Why: upstream PR Checks route jobs to Blacksmith runners this fork cannot use.
+on:
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: fork-checks-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changed:
+    if: github.repository == 'sakazuki/orca'
+    name: check:changed
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: ./.github/actions/install-node-dependencies
+        with:
+          native-runtime: node
+          node-version: '24'
+
+      - name: Run changed-file gate
+        env:
+          ORCA_CODE_QUALITY_BASE: ${{ github.event.pull_request.base.sha || 'origin/main' }}
+        run: pnpm check:changed
