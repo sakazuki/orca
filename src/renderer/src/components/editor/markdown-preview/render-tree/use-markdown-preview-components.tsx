@@ -1,4 +1,4 @@
-import React, { useMemo, useRef, useState } from 'react'
+import React, { useMemo } from 'react'
 import type { Components } from 'react-markdown'
 import type { MarkdownDocument } from '../../../../../../shared/file-listing/file-document'
 import CodeBlockCopyButton from './CodeBlockCopyButton'
@@ -75,7 +75,7 @@ export function useMarkdownPreviewComponents({
   const { renderAnnotationControls, wrapAnnotatedBlock } = annotationRenderers
   const expandMermaidDiagram = useMermaidDiagramExpand()
 
-  const renderers = useMemo((): Components => {
+  return useMemo(() => {
     // Why: preview images come from document text, so main limits them to the document's roots.
     const imageAccess = documentResourceAccess(filePath)
     const linkContext = {
@@ -350,33 +350,4 @@ export function useMarkdownPreviewComponents({
     worktreesByRepo,
     wrapAnnotatedBlock
   ])
-  return useStableComponentTypes(renderers)
 }
-
-// Why: new component types remount every rendered block, which drops the preview's scroll
-// position and focus whenever review-note state changes.
-function useStableComponentTypes(renderers: Components): Components {
-  const latestRef = useRef(renderers)
-  latestRef.current = renderers
-  const [stableTypes] = useState(() => new Map<string, MarkdownElementRenderer>())
-  // A new object identity still re-renders the memoized bodies with the latest renderers.
-  return useMemo(() => {
-    const components: Record<string, MarkdownElementRenderer> = {}
-    for (const tag of Object.keys(renderers)) {
-      let type = stableTypes.get(tag)
-      if (!type) {
-        type = (props) => {
-          // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: every renderer above is a function component called with its own tag's props.
-          const render = latestRef.current[tag as keyof Components] as MarkdownElementRenderer
-          return render(props)
-        }
-        stableTypes.set(tag, type)
-      }
-      components[tag] = type
-    }
-    // oxlint-disable-next-line typescript/consistent-type-assertions -- SAFETY: each key comes from `renderers` and delegates to that tag's renderer.
-    return components as Components
-  }, [renderers, stableTypes])
-}
-
-type MarkdownElementRenderer = (props: Record<string, unknown>) => React.ReactNode
