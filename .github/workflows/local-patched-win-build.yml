@@ -62,14 +62,14 @@ jobs:
       TAG: ${{ needs.resolve.outputs.tag }}
       NODE_OPTIONS: --max-old-space-size=4096
     steps:
-      - name: Checkout upstream tag
-        uses: actions/checkout@v6
-        with:
-          repository: ${{ env.UPSTREAM }}
-          ref: ${{ needs.resolve.outputs.tag }}
-          fetch-depth: 0
-          filter: blob:none
-          persist-credentials: false
+      # Fork policy allows no third-party actions, so every step is plain shell.
+      - name: Clone upstream tag
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config --global core.longpaths true
+          git clone -q --filter=blob:none "https://github.com/$UPSTREAM" .
+          git checkout -q "$TAG"
 
       - name: Apply patch branches
         shell: bash
@@ -77,9 +77,8 @@ jobs:
           set -euo pipefail
           git config user.name github-actions
           git config user.email github-actions@users.noreply.github.com
-          git fetch -q origin main
           for branch in $PATCH_BRANCHES; do
-            git fetch -q "https://github.com/$GITHUB_REPOSITORY" "refs/heads/$branch:refs/patch/$branch"
+            git fetch -q "https://github.com/$GITHUB_REPOSITORY" "refs/heads/$branch"
             # Diff from the last upstream commit merged into the branch = the PR's own changes.
             base="$(git merge-base FETCH_HEAD origin/main)"
             echo "Applying $branch ($base..$(git rev-parse --short FETCH_HEAD))"
@@ -88,20 +87,20 @@ jobs:
           done
           git log --oneline -n $(( $(wc -w <<<"$PATCH_BRANCHES") + 1 ))
 
-      - name: Setup pnpm
-        uses: pnpm/setup@v2
-        with:
-          install: false
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v6
-        with:
-          node-version-file: package.json
-          check-latest: true
-          cache: pnpm
-          cache-dependency-path: |
-            pnpm-lock.yaml
-            mobile/pnpm-lock.yaml
+      - name: Install Node.js and pnpm
+        shell: pwsh
+        run: |
+          $major = (Get-Content package.json -Raw | ConvertFrom-Json).engines.node
+          $v = (Invoke-RestMethod https://nodejs.org/dist/index.json | Where-Object { $_.version -like "v$major.*" } | Select-Object -First 1).version
+          Invoke-WebRequest "https://nodejs.org/dist/$v/node-$v-win-x64.zip" -OutFile "$env:RUNNER_TEMP\node.zip"
+          Expand-Archive "$env:RUNNER_TEMP\node.zip" $env:RUNNER_TEMP
+          $dir = "$env:RUNNER_TEMP\node-$v-win-x64"
+          $env:PATH = "$dir;$env:PATH"
+          $pnpm = ((Get-Content package.json -Raw | ConvertFrom-Json).packageManager -split '\+')[0]
+          npm install -g --prefix $dir $pnpm
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          Add-Content $env:GITHUB_PATH $dir
+          node --version; pnpm --version
 
       - name: Ensure Rust for the Windows CLI launcher
         shell: pwsh
@@ -113,14 +112,11 @@ jobs:
           cargo --version
 
       - name: Install dependencies
-        uses: nick-fields/retry@v4
-        with:
-          timeout_minutes: 10
-          max_attempts: 3
-          retry_wait_seconds: 30
-          command: pnpm install --frozen-lockfile
-
-      - uses: ./.github/actions/install-mobile-dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          for i in 1 2 3; do pnpm install --frozen-lockfile && break; [[ $i == 3 ]] && exit 1; sleep 30; done
+          (cd mobile && pnpm install --frozen-lockfile)
 
       - name: Build app
         shell: bash
