@@ -94,11 +94,12 @@ jobs:
           major="$(node -p "require('./package.json').engines.node")"
           v="$(curl -fsSL https://nodejs.org/dist/index.json | node -e "let s='';process.stdin.on('data',d=>s+=d).on('end',()=>console.log(JSON.parse(s).find(r=>r.version.startsWith('v$major.')).version))")"
           echo "Node $v"
-          curl -fsSL -o "$RUNNER_TEMP/node.zip" "https://nodejs.org/dist/$v/node-$v-win-x64.zip"
-          unzip -q "$RUNNER_TEMP/node.zip" -d "$RUNNER_TEMP"
-          dir="$RUNNER_TEMP/node-$v-win-x64"
+          tmp="$(cygpath -u "$RUNNER_TEMP")"
+          curl -fsSL -o "$tmp/node.zip" "https://nodejs.org/dist/$v/node-$v-win-x64.zip"
+          unzip -q "$tmp/node.zip" -d "$tmp"
+          dir="$tmp/node-$v-win-x64"
           export PATH="$dir:$PATH"
-          npm install -g --prefix "$dir" "$(node -p "require('./package.json').packageManager.split('+')[0]")"
+          npm install -g --allow-scripts=pnpm --prefix "$dir" "$(node -p "require('./package.json').packageManager.split('+')[0]")"
           cygpath -w "$dir" >>"$GITHUB_PATH"
           node --version
           pnpm --version
