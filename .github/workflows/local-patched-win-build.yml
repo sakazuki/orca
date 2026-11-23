@@ -1,0 +1,148 @@
+name: Local Patched Windows Build
+
+# Fork-only: rebuild the latest stablyai/orca stable release with unmerged PR branches applied,
+# and publish the installer as a release on this fork (vX.Y.Z-patched).
+
+on:
+  schedule:
+    - cron: '0 21 * * *'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Upstream stable tag to build (default = latest release)
+        required: false
+        type: string
+      force:
+        description: Rebuild even if the patched release already exists
+        type: boolean
+        default: false
+
+env:
+  # Space-separated branches on this fork whose changes are layered onto the upstream tag.
+  PATCH_BRANCHES: feat/markdown-preview-table-row-notes
+  UPSTREAM: stablyai/orca
+
+permissions:
+  contents: write
+
+concurrency:
+  group: local-patched-win-build
+  cancel-in-progress: false
+
+jobs:
+  resolve:
+    if: github.repository == 'sakazuki/orca'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      skip: ${{ steps.tag.outputs.skip }}
+    steps:
+      - id: tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          INPUT_TAG: ${{ inputs.tag }}
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+          tag="${INPUT_TAG:-$(gh api "repos/$UPSTREAM/releases/latest" -q .tag_name)}"
+          echo "tag=$tag" >>"$GITHUB_OUTPUT"
+          if [[ "$FORCE" != true ]] && gh release view "$tag-patched" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "skip=true" >>"$GITHUB_OUTPUT"
+            echo "::notice::$tag-patched already exists"
+          else
+            echo "skip=false" >>"$GITHUB_OUTPUT"
+          fi
+
+  build-win:
+    needs: resolve
+    if: needs.resolve.outputs.skip != 'true'
+    runs-on: windows-2022
+    timeout-minutes: 120
+    env:
+      TAG: ${{ needs.resolve.outputs.tag }}
+      NODE_OPTIONS: --max-old-space-size=4096
+    steps:
+      - name: Checkout upstream tag
+        uses: actions/checkout@v6
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 0
+          filter: blob:none
+          persist-credentials: false
+
+      - name: Apply patch branches
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions
+          git config user.email github-actions@users.noreply.github.com
+          git fetch -q origin main
+          for branch in $PATCH_BRANCHES; do
+            git fetch -q "https://github.com/$GITHUB_REPOSITORY" "refs/heads/$branch:refs/patch/$branch"
+            # Diff from the last upstream commit merged into the branch = the PR's own changes.
+            base="$(git merge-base FETCH_HEAD origin/main)"
+            echo "Applying $branch ($base..$(git rev-parse --short FETCH_HEAD))"
+            git diff --binary "$base" FETCH_HEAD | git apply --3way --index
+            git commit -q -m "local patch: $branch"
+          done
+          git log --oneline -n $(( $(wc -w <<<"$PATCH_BRANCHES") + 1 ))
+
+      - name: Setup pnpm
+        uses: pnpm/setup@v2
+        with:
+          install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          check-latest: true
+          cache: pnpm
+          cache-dependency-path: |
+            pnpm-lock.yaml
+            mobile/pnpm-lock.yaml
+
+      - name: Ensure Rust for the Windows CLI launcher
+        shell: pwsh
+        run: |
+          if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+            rustup toolchain install stable --profile minimal
+            rustup default stable
+          }
+          cargo --version
+
+      - name: Install dependencies
+        uses: nick-fields/retry@v4
+        with:
+          timeout_minutes: 10
+          max_attempts: 3
+          retry_wait_seconds: 30
+          command: pnpm install --frozen-lockfile
+
+      - uses: ./.github/actions/install-mobile-dependencies
+
+      - name: Build app
+        shell: bash
+        run: pnpm run build:release
+
+      - name: Package installer
+        shell: pwsh
+        run: |
+          node config/scripts/native-build/node-addons/ensure-native-runtime.mjs --runtime=electron
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          pnpm exec electron-builder --config config/electron-builder.config.cjs --win --publish never
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Publish fork release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          release="$TAG-patched"
+          notes="Upstream $UPSTREAM@$TAG + patches: $PATCH_BRANCHES (unsigned)"
+          gh release delete "$release" -R "$GITHUB_REPOSITORY" --cleanup-tag --yes 2>/dev/null || true
+          gh release create "$release" -R "$GITHUB_REPOSITORY" --target main \
+            --title "$release" --notes "$notes" --prerelease \
+            dist/orca-windows-setup.exe
